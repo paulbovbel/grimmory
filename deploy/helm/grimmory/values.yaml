@@ -166,6 +166,10 @@ extraEnv: []
 extraVolumes: []
 extraVolumeMounts: []
 
+# Base path for subpath reverse proxy deployments (e.g. /grimmory for mydomain.com/grimmory).
+# Leave empty or "/" for root deployment.
+basePath: ""
+
 initContainer:
   resources:
     requests:
@@ -174,7 +178,6 @@ initContainer:
     limits:
       cpu: 50m
       memory: 32Mi
-
 nodeSelector: {}
 tolerations: []
 affinity: {}

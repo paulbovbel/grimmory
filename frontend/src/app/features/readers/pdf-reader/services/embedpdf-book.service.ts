@@ -118,7 +118,7 @@ export class EmbedPdfBookService {
 
     const EmbedPDF = (await import('@embedpdf/snippet')).default;
 
-    const wasmUrl = new URL('/assets/pdfium/pdfium.wasm', location.origin).href;
+    const wasmUrl = new URL('assets/pdfium/pdfium.wasm', document.baseURI).href;
     const requestedLocale = localeCode || 'en';
 
     this.container = EmbedPDF.init({
