@@ -20,6 +20,7 @@ import {CommandPaletteComponent} from './features/command-palette/command-palett
 import {CommandPaletteService} from './features/command-palette/command-palette.service';
 import {LibraryImportProgressService} from './shared/service/library-import-progress.service';
 import {AuthorService} from './features/author-browser/service/author.service';
+import {API_CONFIG} from './core/config/api-config';
 
 @Component({
   selector: 'app-root',
@@ -96,7 +97,7 @@ export class AppComponent implements OnInit, OnDestroy {
   };
 
   private checkServerReachable(): Promise<boolean> {
-    return fetch('/api/public/settings', {method: 'HEAD', cache: 'no-store'})
+    return fetch(`${API_CONFIG.BASE_URL}/api/public/settings`, {method: 'HEAD', cache: 'no-store'})
       .then(() => true)
       .catch(() => false);
   }
