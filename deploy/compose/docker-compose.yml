@@ -35,17 +35,12 @@ services:
       - ./data:/app/data
       - ./books:/books
       - ./bookdrop:/bookdrop
-    # Uncomment the block below if you need to override the defaults:
-    #healthcheck:
-    #  test: wget -q --spider http://localhost:6060${BASE_PATH:-}/api/v1/healthcheck
-    #  interval: 60s
-    #  retries: 5
-    #  start_period: 60s
-    #  timeout: 10s
-    #
-    # Uncomment the block below if you want to disable healthchecks:
-    #healthcheck:
-    #  disable: true
+    healthcheck:
+      test: wget -q -O - "http://localhost:6060$${BASE_PATH:-}/api/v1/healthcheck"
+      interval: 60s
+      retries: 5
+      start_period: 60s
+      timeout: 10s
     restart: unless-stopped
 
   mariadb:
