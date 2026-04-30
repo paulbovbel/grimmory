@@ -22,7 +22,7 @@ Environment=DATABASE_URL=jdbc:mariadb://localhost:3306/grimmory
 Environment=DATABASE_USERNAME=grimmory
 # For subpath reverse proxy deployments (e.g. mydomain.com/grimmory), uncomment:
 # Environment=BASE_PATH=/grimmory
-HealthCmd=CMD-SHELL wget -q --spider http://localhost:${BOOKLORE_PORT:-6060}${BASE_PATH:-}/api/v1/healthcheck
+HealthCmd=CMD-SHELL wget -q --spider http://localhost:${BOOKLORE_PORT:-6060}${BASE_PATH%/}/api/v1/healthcheck
 HealthInterval=1m
 HealthRetries=5
 HealthStartPeriod=1m
