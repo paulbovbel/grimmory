@@ -97,7 +97,7 @@ export class AppComponent implements OnInit, OnDestroy {
   };
 
   private checkServerReachable(): Promise<boolean> {
-    return fetch(`${API_CONFIG.BASE_URL}/api/public/settings`, {method: 'HEAD', cache: 'no-store'})
+    return fetch(`${API_CONFIG.BASE_URL}/api/v1/public-settings`, {method: 'HEAD', cache: 'no-store'})
       .then(() => true)
       .catch(() => false);
   }
