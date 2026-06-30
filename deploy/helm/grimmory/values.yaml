@@ -123,21 +123,21 @@ resources: {}
 # This is to setup the startup, liveness and readiness probes more information can be found here: https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
 startupProbe:
   httpGet:
-    path: /api/v1/healthcheck
+    path: "{{ .Values.basePath }}/api/v1/healthcheck"
     port: http
   failureThreshold: 5
   periodSeconds: 30
   timeoutSeconds: 5
 livenessProbe:
   httpGet:
-    path: /api/v1/healthcheck
+    path: "{{ .Values.basePath }}/api/v1/healthcheck"
     port: http
   failureThreshold: 5
   periodSeconds: 10
   timeoutSeconds: 5
 readinessProbe:
   httpGet:
-    path: /api/v1/healthcheck
+    path: "{{ .Values.basePath }}/api/v1/healthcheck"
     port: http
   failureThreshold: 5
   periodSeconds: 10
