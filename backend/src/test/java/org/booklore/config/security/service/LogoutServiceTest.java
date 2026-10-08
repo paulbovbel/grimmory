@@ -21,6 +21,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.mock.web.MockHttpServletRequest;
 import org.springframework.security.core.Authentication;
 
 import java.util.List;
@@ -63,7 +64,7 @@ class LogoutServiceTest {
         var user = buildUser(1L, "testuser", ProvisioningMethod.LOCAL);
         stubAuthenticated("testuser", user);
 
-        LogoutResponse response = logoutService.logout(mockAuth(), null, null);
+        LogoutResponse response = logoutService.logout(mockAuth(), null, null, request());
 
         assertThat(response.logoutUrl()).isNull();
     }
@@ -74,7 +75,7 @@ class LogoutServiceTest {
         stubAuthenticated("oidcuser", user);
         stubFullOidcFlow(user, "https://idp.example.com/logout");
 
-        LogoutResponse response = logoutService.logout(mockAuth(), null, "https://app.example.com");
+        LogoutResponse response = logoutService.logout(mockAuth(), null, "https://app.example.com", request());
 
         assertThat(response.logoutUrl()).isNotNull();
         assertThat(response.logoutUrl()).contains("https://idp.example.com/logout");
@@ -92,7 +93,7 @@ class LogoutServiceTest {
 
         when(refreshTokenService.findByToken("valid-token")).thenReturn(Optional.of(tokenEntity));
 
-        LogoutResponse response = logoutService.logout(null, "valid-token", null);
+        LogoutResponse response = logoutService.logout(null, "valid-token", null, request());
 
         assertThat(response.logoutUrl()).isNull();
         verify(refreshTokenService).findByToken("valid-token");
@@ -100,13 +101,13 @@ class LogoutServiceTest {
 
     @Test
     void logout_withNoAuthAndNoRefreshToken_throwsUnauthorized() {
-        assertThatThrownBy(() -> logoutService.logout(null, null, null))
+        assertThatThrownBy(() -> logoutService.logout(null, null, null, request()))
                 .isInstanceOf(APIException.class);
     }
 
     @Test
     void logout_withBlankRefreshToken_throwsUnauthorized() {
-        assertThatThrownBy(() -> logoutService.logout(null, "   ", null))
+        assertThatThrownBy(() -> logoutService.logout(null, "   ", null, request()))
                 .isInstanceOf(APIException.class);
     }
 
@@ -114,7 +115,7 @@ class LogoutServiceTest {
     void logout_withRefreshTokenNotFound_throwsUnauthorized() {
         when(refreshTokenService.findByToken("invalid")).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> logoutService.logout(null, "invalid", null))
+        assertThatThrownBy(() -> logoutService.logout(null, "invalid", null, request()))
                 .isInstanceOf(APIException.class);
     }
 
@@ -125,7 +126,7 @@ class LogoutServiceTest {
         when(authenticationService.getAuthenticatedUser()).thenReturn(bookLoreUser);
         when(userRepository.findByUsername("missing")).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> logoutService.logout(mockAuth(), null, null))
+        assertThatThrownBy(() -> logoutService.logout(mockAuth(), null, null, request()))
                 .isInstanceOf(APIException.class);
     }
 
@@ -134,7 +135,7 @@ class LogoutServiceTest {
         var user = buildUser(1L, "testuser", ProvisioningMethod.LOCAL);
         stubAuthenticated("testuser", user);
 
-        logoutService.logout(mockAuth(), null, null);
+        logoutService.logout(mockAuth(), null, null, request());
 
         verify(refreshTokenService).revokeAllForUser(user);
     }
@@ -151,7 +152,7 @@ class LogoutServiceTest {
 
         stubOidcWithSession(oidcSession, "https://idp.example.com/logout");
 
-        logoutService.logout(mockAuth(), null, "https://app.example.com");
+        logoutService.logout(mockAuth(), null, "https://app.example.com", request());
 
         assertThat(oidcSession.isRevoked()).isTrue();
         verify(oidcSessionRepository).save(oidcSession);
@@ -163,7 +164,7 @@ class LogoutServiceTest {
         stubAuthenticated("oidcuser", user);
         stubFullOidcFlow(user, "https://idp.example.com/logout");
 
-        LogoutResponse response = logoutService.logout(mockAuth(), null, "https://myapp.com");
+        LogoutResponse response = logoutService.logout(mockAuth(), null, "https://myapp.com", request());
 
         String url = response.logoutUrl();
         assertThat(url).startsWith("https://idp.example.com/logout");
@@ -173,14 +174,26 @@ class LogoutServiceTest {
     }
 
     @Test
-    void logout_logoutUrlOmitsRedirectUriWhenOriginIsNull() {
+    void logout_logoutUrlIncludesContextPathInPostLogoutRedirect() {
         var user = buildUser(1L, "oidcuser", ProvisioningMethod.OIDC);
         stubAuthenticated("oidcuser", user);
         stubFullOidcFlow(user, "https://idp.example.com/logout");
 
-        LogoutResponse response = logoutService.logout(mockAuth(), null, null);
+        LogoutResponse response = logoutService.logout(mockAuth(), null, "https://app.example.com", request("/grimmory"));
 
-        assertThat(response.logoutUrl()).doesNotContain("post_logout_redirect_uri");
+        assertThat(response.logoutUrl()).contains("post_logout_redirect_uri=https://app.example.com/grimmory/login");
+    }
+
+    @Test
+    void logout_logoutUrlIncludesRedirectUriWhenOriginIsNull() {
+        var user = buildUser(1L, "oidcuser", ProvisioningMethod.OIDC);
+        stubAuthenticated("oidcuser", user);
+        stubFullOidcFlow(user, "https://idp.example.com/logout");
+        when(refreshTokenRepository.findAllByUserAndRevokedFalse(user)).thenReturn(List.of());
+
+        LogoutResponse response = logoutService.logout(mockAuth(), null, null, request());
+
+        assertThat(response.logoutUrl()).contains("post_logout_redirect_uri");
     }
 
     @Test
@@ -191,7 +204,7 @@ class LogoutServiceTest {
         when(oidcSessionRepository.findFirstByUserIdAndRevokedFalseOrderByCreatedAtDesc(1L))
                 .thenReturn(Optional.empty());
 
-        LogoutResponse response = logoutService.logout(mockAuth(), null, "https://app.example.com");
+        LogoutResponse response = logoutService.logout(mockAuth(), null, "https://app.example.com", request());
 
         assertThat(response.logoutUrl()).isNull();
     }
@@ -208,7 +221,7 @@ class LogoutServiceTest {
 
         stubOidcWithSession(oidcSession, null);
 
-        LogoutResponse response = logoutService.logout(mockAuth(), null, "https://app.example.com");
+        LogoutResponse response = logoutService.logout(mockAuth(), null, "https://app.example.com", request());
 
         assertThat(response.logoutUrl()).isNull();
     }
@@ -219,7 +232,7 @@ class LogoutServiceTest {
         stubAuthenticated("oidcuser", user);
         stubAppSettings(false, null);
 
-        LogoutResponse response = logoutService.logout(mockAuth(), null, "https://app.example.com");
+        LogoutResponse response = logoutService.logout(mockAuth(), null, "https://app.example.com", request());
 
         assertThat(response.logoutUrl()).isNull();
         verifyNoInteractions(oidcSessionRepository);
@@ -238,7 +251,7 @@ class LogoutServiceTest {
         when(oidcSessionRepository.findFirstByUserIdAndRevokedFalseOrderByCreatedAtDesc(1L))
                 .thenThrow(new RuntimeException("db error"));
 
-        LogoutResponse response = logoutService.logout(mockAuth(), null, "https://app.example.com");
+        LogoutResponse response = logoutService.logout(mockAuth(), null, "https://app.example.com", request());
 
         assertThat(response.logoutUrl()).isNull();
     }
@@ -255,6 +268,19 @@ class LogoutServiceTest {
         var auth = mock(Authentication.class);
         when(auth.isAuthenticated()).thenReturn(true);
         return auth;
+    }
+
+    private MockHttpServletRequest request() {
+        return request("");
+    }
+
+    private MockHttpServletRequest request(String contextPath) {
+        var request = new MockHttpServletRequest();
+        request.setScheme("https");
+        request.setServerName("app.example.com");
+        request.setServerPort(443);
+        request.setContextPath(contextPath);
+        return request;
     }
 
     private void stubAuthenticated(String username, BookLoreUserEntity userEntity) {
