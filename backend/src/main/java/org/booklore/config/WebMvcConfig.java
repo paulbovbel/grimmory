@@ -5,7 +5,6 @@ import org.booklore.interceptor.KomgaCleanInterceptor;
 import org.booklore.interceptor.KomgaEnabledInterceptor;
 import org.booklore.interceptor.OpdsEnabledInterceptor;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.core.io.ClassPathResource;
 import org.springframework.core.io.Resource;
 import org.springframework.core.task.VirtualThreadTaskExecutor;
 import org.springframework.data.web.config.EnableSpringDataWebSupport;
@@ -28,6 +27,7 @@ public class WebMvcConfig implements WebMvcConfigurer {
     private final OpdsEnabledInterceptor opdsEnabledInterceptor;
     private final KomgaEnabledInterceptor komgaEnabledInterceptor;
     private final KomgaCleanInterceptor komgaCleanInterceptor;
+    private final SpaContentProvider spaContentProvider;
 
     @Override
     public void configureAsyncSupport(AsyncSupportConfigurer configurer) {
@@ -36,6 +36,8 @@ public class WebMvcConfig implements WebMvcConfigurer {
 
     @Override
     public void addResourceHandlers(ResourceHandlerRegistry registry) {
+        final Resource spaFallback = spaContentProvider.getIndexHtmlResource();
+
         registry.addResourceHandler("/**")
                 .addResourceLocations("classpath:/static/")
                 .setCacheControl(CacheControl.noStore().noTransform())
@@ -47,9 +49,8 @@ public class WebMvcConfig implements WebMvcConfigurer {
                         if (resource.exists() && resource.isReadable()) {
                             return resource;
                         }
-
-                        Resource index = new ClassPathResource("/static/index.html");
-                        return index.exists() && index.isReadable() ? index : null;
+                        // SPA fallback: return the (potentially rewritten) index.html
+                        return spaFallback.exists() && spaFallback.isReadable() ? spaFallback : null;
                     }
                 });
     }

@@ -79,7 +79,7 @@ public class KoboServerProxy {
     }
 
     private URI buildKoboURI(HttpServletRequest request) {
-        String path = KOBO_API_PREFIX_PATTERN.matcher(request.getRequestURI()).replaceFirst("");
+        String path = KOBO_API_PREFIX_PATTERN.matcher(request.getServletPath()).replaceFirst("");
         String queryString = request.getQueryString();
 
         URI uri = UriComponentsBuilder.fromUriString(KOBO_BASE_URI)
