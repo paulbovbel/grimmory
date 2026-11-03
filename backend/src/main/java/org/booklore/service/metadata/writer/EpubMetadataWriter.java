@@ -9,6 +9,7 @@ import org.booklore.model.entity.BookMetadataEntity;
 import org.booklore.model.enums.BookFileType;
 import org.booklore.service.ArchiveService;
 import org.booklore.service.appsettings.AppSettingService;
+import org.booklore.util.AtomicFileWriter;
 import org.booklore.util.MimeDetector;
 import org.booklore.util.SecureXmlUtils;
 import org.booklore.util.epub.EpubContentReader;
@@ -33,15 +34,16 @@ import javax.xml.xpath.XPathFactory;
 import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.IOException;
+import java.io.OutputStream;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.util.*;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.function.Predicate;
+import java.util.zip.ZipFile;
 
 @Slf4j
 @Component
@@ -59,13 +61,18 @@ public class EpubMetadataWriter implements MetadataWriter {
             return;
         }
 
-        File backupFile = new File(epubFile.getParentFile(), epubFile.getName() + ".bak");
         try {
-            Files.copy(epubFile.toPath(), backupFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
-        } catch (IOException ex) {
-            log.warn("Failed to create backup of EPUB {}: {}", epubFile.getName(), ex.getMessage());
-            return;
+            if (AtomicFileWriter.update(epubFile.toPath(), EpubState::read,
+                    working -> writeMetadata(epubFile, working, metadata, clear), EpubState::validate)) {
+                log.info("Metadata updated in EPUB: {}", epubFile.getName());
+            }
+        } catch (Exception e) {
+            log.warn("Failed to write metadata to EPUB file {}: {}", epubFile.getName(), e.getMessage(), e);
         }
+    }
+
+    private boolean writeMetadata(File epubFile, Path output, BookMetadataEntity metadata,
+                                  MetadataClearFlags clear) throws Exception {
         Path tempDir = null;
         try {
             tempDir = Files.createTempDirectory("epub_edit_" + UUID.randomUUID());
@@ -226,36 +233,14 @@ public class EpubMetadataWriter implements MetadataWriter {
                 transformer.setOutputProperty(OutputKeys.ENCODING, "UTF-8");
                 transformer.transform(new DOMSource(opfDoc), new StreamResult(opfPath.toFile()));
 
-                File tempEpub = new File(epubFile.getParentFile(), epubFile.getName() + ".tmp");
-                EpubContentWriter.createEpubFromDirectory(tempDir, tempEpub.toPath());
-
-                if (!epubFile.delete()) throw new IOException("Could not delete original EPUB");
-                if (!tempEpub.renameTo(epubFile)) throw new IOException("Could not rename temp EPUB");
-
-                log.info("Metadata updated in EPUB: {}", epubFile.getName());
+                EpubContentWriter.createEpubFromDirectory(tempDir, output);
             } else {
                 log.info("No changes detected. Skipping EPUB write for: {}", epubFile.getName());
             }
-        } catch (Exception e) {
-            log.warn("Failed to write metadata to EPUB file {}: {}", epubFile.getName(), e.getMessage(), e);
-            if (backupFile.exists()) {
-                try {
-                    Files.copy(backupFile.toPath(), epubFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
-                    log.info("Restored EPUB from backup: {}", epubFile.getName());
-                } catch (IOException io) {
-                    log.error("Failed to restore EPUB from backup for {}: {}", epubFile.getName(), io.getMessage(), io);
-                }
-            }
+            return hasChanges[0];
         } finally {
             if (tempDir != null) {
                 deleteDirectoryRecursively(tempDir);
-            }
-            if (backupFile.exists()) {
-                try {
-                    Files.delete(backupFile.toPath());
-                } catch (IOException ex) {
-                    log.warn("Failed to delete backup for {}: {}", epubFile.getName(), ex.getMessage());
-                }
             }
         }
     }
@@ -379,6 +364,18 @@ public class EpubMetadataWriter implements MetadataWriter {
             return;
         }
 
+        try {
+            AtomicFileWriter.update(epubFile.toPath(), EpubState::read, working -> {
+                writeCover(epubFile, working, contents);
+                return true;
+            }, EpubState::validate);
+            log.info("Cover image updated in EPUB: {}", epubFile.getName());
+        } catch (Exception e) {
+            log.warn("Failed to update EPUB cover image: {}", e.getMessage(), e);
+        }
+    }
+
+    private void writeCover(File epubFile, Path output, byte[] contents) throws Exception {
         Path tempDir = null;
         try {
             tempDir = Files.createTempDirectory("epub_cover_" + UUID.randomUUID());
@@ -399,16 +396,7 @@ public class EpubMetadataWriter implements MetadataWriter {
             transformer.setOutputProperty(OutputKeys.ENCODING, "UTF-8");
             transformer.transform(new DOMSource(opfDoc), new StreamResult(opfPath.toFile()));
 
-            File tempEpub = new File(epubFile.getParentFile(), epubFile.getName() + ".tmp");
-            EpubContentWriter.createEpubFromDirectory(tempDir, tempEpub.toPath());
-
-            if (!epubFile.delete()) throw new IOException("Could not delete original EPUB");
-            if (!tempEpub.renameTo(epubFile)) throw new IOException("Could not rename temp EPUB");
-
-            log.info("Cover image updated in EPUB: {}", epubFile.getName());
-
-        } catch (Exception e) {
-            log.warn("Failed to update EPUB cover image: {}", e.getMessage(), e);
+            EpubContentWriter.createEpubFromDirectory(tempDir, output);
         } finally {
             if (tempDir != null) {
                 deleteDirectoryRecursively(tempDir);
@@ -419,6 +407,61 @@ public class EpubMetadataWriter implements MetadataWriter {
     @Override
     public BookFileType getSupportedBookType() {
         return BookFileType.EPUB;
+    }
+
+    private record EpubState(List<String> spine, Set<String> files, Map<String, Long> textContent) {
+        static EpubState read(Path path) throws Exception {
+            try (ZipFile zip = new ZipFile(path.toFile())) {
+                Document container = readXml(zip, "META-INF/container.xml");
+                NodeList roots = container.getElementsByTagNameNS("*", "rootfile");
+                if (roots.getLength() == 0) {
+                    throw new IOException("EPUB has no package document: " + path);
+                }
+                String opf = ((Element) roots.item(0)).getAttribute("full-path");
+                Document packageDocument = readXml(zip, opf);
+                List<String> spine = new ArrayList<>();
+                NodeList references = packageDocument.getElementsByTagNameNS("*", "itemref");
+                for (int i = 0; i < references.getLength(); i++) {
+                    Element reference = (Element) references.item(i);
+                    spine.add(reference.getAttribute("idref") + ":" + reference.getAttribute("linear"));
+                }
+                Set<String> files = new HashSet<>();
+                Map<String, Long> textContent = new HashMap<>();
+                var entries = zip.entries();
+                while (entries.hasMoreElements()) {
+                    var entry = entries.nextElement();
+                    if (entry.isDirectory()) {
+                        continue;
+                    }
+                    files.add(entry.getName());
+                    // Metadata and cover changes must not rewrite chapter or navigation content.
+                    if (entry.getName().toLowerCase(Locale.ROOT).matches(".*\\.(xhtml|html|htm|ncx)")) {
+                        textContent.put(entry.getName(), entry.getCrc());
+                    }
+                    try (var input = zip.getInputStream(entry)) {
+                        input.transferTo(OutputStream.nullOutputStream());
+                    }
+                }
+                return new EpubState(spine, files, textContent);
+            }
+        }
+
+        private static Document readXml(ZipFile zip, String name) throws Exception {
+            var entry = zip.getEntry(name);
+            if (entry == null) {
+                throw new IOException("EPUB is missing " + name);
+            }
+            try (var input = zip.getInputStream(entry)) {
+                return SecureXmlUtils.createSecureDocumentBuilder(true).parse(input);
+            }
+        }
+
+        void validate(EpubState rewritten) throws IOException {
+            if (!spine.equals(rewritten.spine) || !rewritten.files.containsAll(files)
+                    || !textContent.equals(rewritten.textContent)) {
+                throw new IOException("Metadata rewrite changed EPUB content or reading order");
+            }
+        }
     }
 
     private String generateCoverId(Document doc, Path dir, String extension) {

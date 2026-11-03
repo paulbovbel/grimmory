@@ -12,12 +12,15 @@ import org.booklore.model.entity.BookMetadataEntity;
 import org.booklore.model.entity.LibraryPathEntity;
 import org.booklore.service.ArchiveService;
 import org.booklore.service.appsettings.AppSettingService;
+import org.booklore.util.epub.EpubContentWriter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.Spy;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -33,6 +36,7 @@ import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.util.Enumeration;
 import java.util.List;
 import java.util.Set;
@@ -45,7 +49,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.when;
+import static org.mockito.ArgumentMatchers.any;
 import java.net.URLDecoder;
 
 @ExtendWith(MockitoExtension.class)
@@ -880,6 +886,42 @@ class EpubMetadataWriterTest {
 
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void metadataAndCoverRewritesCannotPublishAnEpubThatLostItsChapters(boolean cover) throws Exception {
+        Path original = Files.write(tempDir.resolve("original.epub"), createEpubWithUnicodeCoverHref());
+        byte[] originalBytes = Files.readAllBytes(original);
+        Path backup = Files.writeString(tempDir.resolve("original.epub.bak"), "existing recovery backup");
+        File metadataOnly = createEpubWithOpf("""
+                <package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+                    <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+                        <dc:title>Metadata only</dc:title>
+                    </metadata>
+                </package>
+                """, "metadata-only.epub");
+
+        try (var output = mockStatic(EpubContentWriter.class)) {
+            output.when(() -> EpubContentWriter.createEpubFromDirectory(any(Path.class), any(Path.class)))
+                    .thenAnswer(invocation -> {
+                        Files.copy(metadataOnly.toPath(), invocation.getArgument(1),
+                                StandardCopyOption.REPLACE_EXISTING);
+                        return null;
+                    });
+            if (cover) {
+                writer.replaceCoverImageFromBytes(original.toFile(), createMinimalPngImage());
+            } else {
+                writer.saveMetadataToFile(original.toFile(), metadata, null);
+            }
+            output.verify(() -> EpubContentWriter.createEpubFromDirectory(any(Path.class), any(Path.class)));
+        }
+
+        assertThat(Files.readAllBytes(original)).containsExactly(originalBytes);
+        assertThat(backup).hasContent("existing recovery backup");
+        try (var files = Files.list(tempDir)) {
+            assertThat(files).containsExactlyInAnyOrder(original, backup, metadataOnly.toPath());
+        }
+    }
+
     private Document parseOpf(File epubFile) throws Exception {
         try (ZipFile zf = new ZipFile(epubFile)) {
             ZipEntry ze = zf.getEntry("OEBPS/content.opf");
@@ -1049,4 +1091,3 @@ class EpubMetadataWriterTest {
         };
     }
 }
-
