@@ -8,20 +8,31 @@ import org.booklore.model.dto.settings.MetadataPersistenceSettings;
 import org.booklore.model.entity.BookMetadataEntity;
 import org.booklore.model.enums.BookFileType;
 import org.booklore.service.appsettings.AppSettingService;
+import org.booklore.util.AtomicFileWriter;
 import org.jaudiotagger.audio.AudioFile;
 import org.jaudiotagger.audio.AudioFileIO;
+import org.jaudiotagger.audio.AudioHeader;
 import org.jaudiotagger.tag.FieldKey;
 import org.jaudiotagger.tag.Tag;
 import org.jaudiotagger.tag.images.Artwork;
 import org.jaudiotagger.tag.images.ArtworkFactory;
+import org.jcodec.containers.mp4.MP4Util;
+import org.jcodec.containers.mp4.boxes.TrakBox;
 import org.springframework.stereotype.Component;
 
-import java.io.*;
+import java.io.File;
+import java.io.IOException;
+import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Locale;
+import java.util.Objects;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+
+import static java.nio.file.StandardOpenOption.READ;
 
 @Slf4j
 @Component
@@ -36,80 +47,73 @@ public class AudiobookMetadataWriter implements MetadataWriter {
 
     @Override
     public void saveMetadataToFile(File audioFile, BookMetadataEntity metadata, MetadataClearFlags clear) {
-        if (!shouldSaveMetadataToFile(audioFile)) {
-            return;
-        }
-
-        File backupFile = new File(audioFile.getParentFile(), audioFile.getName() + ".bak");
-        try {
-            Files.copy(audioFile.toPath(), backupFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
-        } catch (IOException ex) {
-            log.warn("Failed to create backup of audiobook {}: {}", audioFile.getName(), ex.getMessage());
+        if (!shouldSaveMetadataToFile(audioFile) || audioFile.isDirectory()) {
             return;
         }
 
         try {
-            AudioFile f = AudioFileIO.read(audioFile);
-            Tag tag = f.getTagOrCreateAndSetDefault();
+            boolean updated = updateAudioFile(audioFile, f -> {
+                Tag tag = f.getTagOrCreateAndSetDefault();
 
-            boolean[] hasChanges = {false};
-            MetadataCopyHelper helper = new MetadataCopyHelper(metadata);
+                boolean[] hasChanges = {false};
+                MetadataCopyHelper helper = new MetadataCopyHelper(metadata);
 
-            helper.copyTitle(clear != null && clear.isTitle(), val -> {
-                setTagField(tag, FieldKey.ALBUM, val, hasChanges);
-                setTagField(tag, FieldKey.TITLE, val, hasChanges);
+                helper.copyTitle(clear != null && clear.isTitle(), val -> {
+                    setTagField(tag, FieldKey.ALBUM, val, hasChanges);
+                    setTagField(tag, FieldKey.TITLE, val, hasChanges);
+                });
+
+                helper.copyAuthors(clear != null && clear.isAuthors(), authors -> {
+                    String authorStr = authors != null ? String.join("; ", authors) : null;
+                    setTagField(tag, FieldKey.ALBUM_ARTIST, authorStr, hasChanges);
+                    setTagField(tag, FieldKey.ARTIST, authorStr, hasChanges);
+                });
+
+                if (StringUtils.isNotBlank(metadata.getNarrator())) {
+                    setTagField(tag, FieldKey.COMPOSER, metadata.getNarrator(), hasChanges);
+                }
+
+                helper.copyDescription(clear != null && clear.isDescription(), val -> {
+                    setTagField(tag, FieldKey.COMMENT, val, hasChanges);
+                });
+
+                helper.copyPublisher(clear != null && clear.isPublisher(), val -> {
+                    setTagField(tag, FieldKey.RECORD_LABEL, val, hasChanges);
+                });
+
+                helper.copyPublishedDate(clear != null && clear.isPublishedDate(), val -> {
+                    String year = val != null ? String.valueOf(val.getYear()) : null;
+                    setTagField(tag, FieldKey.YEAR, year, hasChanges);
+                });
+
+                helper.copyCategories(clear != null && clear.isCategories(), categories -> {
+                    String genre = categories != null && !categories.isEmpty()
+                            ? String.join("; ", categories)
+                            : null;
+                    setTagField(tag, FieldKey.GENRE, genre, hasChanges);
+                });
+
+                helper.copyLanguage(clear != null && clear.isLanguage(), val -> {
+                    setTagField(tag, FieldKey.LANGUAGE, val, hasChanges);
+                });
+
+                helper.copySeriesName(clear != null && clear.isSeriesName(), val -> {
+                    setTagField(tag, FieldKey.GROUPING, val, hasChanges);
+                });
+
+                helper.copySeriesNumber(clear != null && clear.isSeriesNumber(), val -> {
+                    String trackNo = val != null ? String.format("%.0f", val) : null;
+                    setTagField(tag, FieldKey.TRACK, trackNo, hasChanges);
+                });
+
+                helper.copySeriesTotal(clear != null && clear.isSeriesTotal(), val -> {
+                    String trackTotal = val != null ? String.valueOf(val) : null;
+                    setTagField(tag, FieldKey.TRACK_TOTAL, trackTotal, hasChanges);
+                });
+
+                return hasChanges[0];
             });
-
-            helper.copyAuthors(clear != null && clear.isAuthors(), authors -> {
-                String authorStr = authors != null ? String.join("; ", authors) : null;
-                setTagField(tag, FieldKey.ALBUM_ARTIST, authorStr, hasChanges);
-                setTagField(tag, FieldKey.ARTIST, authorStr, hasChanges);
-            });
-
-            if (StringUtils.isNotBlank(metadata.getNarrator())) {
-                setTagField(tag, FieldKey.COMPOSER, metadata.getNarrator(), hasChanges);
-            }
-
-            helper.copyDescription(clear != null && clear.isDescription(), val -> {
-                setTagField(tag, FieldKey.COMMENT, val, hasChanges);
-            });
-
-            helper.copyPublisher(clear != null && clear.isPublisher(), val -> {
-                setTagField(tag, FieldKey.RECORD_LABEL, val, hasChanges);
-            });
-
-            helper.copyPublishedDate(clear != null && clear.isPublishedDate(), val -> {
-                String year = val != null ? String.valueOf(val.getYear()) : null;
-                setTagField(tag, FieldKey.YEAR, year, hasChanges);
-            });
-
-            helper.copyCategories(clear != null && clear.isCategories(), categories -> {
-                String genre = categories != null && !categories.isEmpty()
-                        ? String.join("; ", categories)
-                        : null;
-                setTagField(tag, FieldKey.GENRE, genre, hasChanges);
-            });
-
-            helper.copyLanguage(clear != null && clear.isLanguage(), val -> {
-                setTagField(tag, FieldKey.LANGUAGE, val, hasChanges);
-            });
-
-            helper.copySeriesName(clear != null && clear.isSeriesName(), val -> {
-                setTagField(tag, FieldKey.GROUPING, val, hasChanges);
-            });
-
-            helper.copySeriesNumber(clear != null && clear.isSeriesNumber(), val -> {
-                String trackNo = val != null ? String.format("%.0f", val) : null;
-                setTagField(tag, FieldKey.TRACK, trackNo, hasChanges);
-            });
-
-            helper.copySeriesTotal(clear != null && clear.isSeriesTotal(), val -> {
-                String trackTotal = val != null ? String.valueOf(val) : null;
-                setTagField(tag, FieldKey.TRACK_TOTAL, trackTotal, hasChanges);
-            });
-
-            if (hasChanges[0]) {
-                f.commit();
+            if (updated) {
                 log.info("Metadata updated in audiobook: {}", audioFile.getName());
             } else {
                 log.debug("No changes detected. Skipping audiobook write for: {}", audioFile.getName());
@@ -117,22 +121,6 @@ public class AudiobookMetadataWriter implements MetadataWriter {
 
         } catch (Exception e) {
             log.warn("Failed to write metadata to audiobook file {}: {}", audioFile.getName(), e.getMessage(), e);
-            if (backupFile.exists()) {
-                try {
-                    Files.copy(backupFile.toPath(), audioFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
-                    log.info("Restored audiobook from backup: {}", audioFile.getName());
-                } catch (IOException io) {
-                    log.error("Failed to restore audiobook from backup for {}: {}", audioFile.getName(), io.getMessage(), io);
-                }
-            }
-        } finally {
-            if (backupFile.exists()) {
-                try {
-                    Files.delete(backupFile.toPath());
-                } catch (IOException ex) {
-                    log.warn("Failed to delete backup for {}: {}", audioFile.getName(), ex.getMessage());
-                }
-            }
         }
     }
 
@@ -199,15 +187,16 @@ public class AudiobookMetadataWriter implements MetadataWriter {
         }
 
         try {
-            AudioFile f = AudioFileIO.read(bookFile);
-            Tag tag = f.getTagOrCreateAndSetDefault();
+            updateAudioFile(bookFile, f -> {
+                Tag tag = f.getTagOrCreateAndSetDefault();
 
-            tag.deleteArtworkField();
-            Artwork artwork = ArtworkFactory.getNew();
-            artwork.setBinaryData(coverData);
-            artwork.setMimeType(detectMimeType(coverData));
-            tag.setField(artwork);
-            f.commit();
+                tag.deleteArtworkField();
+                Artwork artwork = ArtworkFactory.getNew();
+                artwork.setBinaryData(coverData);
+                artwork.setMimeType(detectMimeType(coverData));
+                tag.setField(artwork);
+                return true;
+            });
 
             log.info("Cover image updated in audiobook: {}", bookFile.getName());
         } catch (Exception e) {
@@ -218,6 +207,65 @@ public class AudiobookMetadataWriter implements MetadataWriter {
     @Override
     public BookFileType getSupportedBookType() {
         return BookFileType.AUDIOBOOK;
+    }
+
+    @FunctionalInterface
+    private interface AudioUpdate {
+        boolean apply(AudioFile audioFile) throws Exception;
+    }
+
+    private boolean updateAudioFile(File file, AudioUpdate update) throws Exception {
+        String name = file.getName();
+        String extension = name.substring(name.lastIndexOf('.') + 1).toLowerCase(Locale.ROOT);
+        return AtomicFileWriter.update(file.toPath(), path -> AudioState.read(path, extension), working -> {
+            // Keep the real format when the working copy has an unrecognized extension.
+            AudioFile audioFile = AudioFileIO.readAs(working.toFile(), extension);
+            if (!update.apply(audioFile)) {
+                return false;
+            }
+            audioFile.commit();
+            return true;
+        }, AudioState::validate);
+    }
+
+    private record AudioState(double duration, int sampleRate, String channels, List<Track> tracks) {
+        static AudioState read(Path path, String extension) throws Exception {
+            AudioHeader header = AudioFileIO.readAs(path.toFile(), extension).getAudioHeader();
+            if (header == null || !Double.isFinite(header.getPreciseTrackLength())
+                    || header.getPreciseTrackLength() <= 0 || header.getSampleRateAsNumber() <= 0) {
+                throw new IOException("Audiobook has no readable audio: " + path);
+            }
+            List<Track> tracks = List.of();
+            if (List.of("m4b", "m4a", "mp4").contains(extension)) {
+                try (FileChannel channel = FileChannel.open(path, READ)) {
+                    var movie = MP4Util.parseFullMovieChannel(channel);
+                    if (movie == null) {
+                        throw new IOException("Audiobook has no MP4 movie: " + path);
+                    }
+                    tracks = Arrays.stream(movie.getMoov().getTracks()).map(Track::read).toList();
+                    if (tracks.stream().noneMatch(track -> "soun".equals(track.handler()))) {
+                        throw new IOException("Audiobook has no MP4 audio track: " + path);
+                    }
+                }
+            }
+            return new AudioState(header.getPreciseTrackLength(), header.getSampleRateAsNumber(),
+                    header.getChannels(), tracks);
+        }
+
+        void validate(AudioState rewritten) throws IOException {
+            // Allow sub-second rounding differences, not lost audio or chapter tracks.
+            if (Math.abs(duration - rewritten.duration) > 1.0 || sampleRate != rewritten.sampleRate
+                    || !Objects.equals(channels, rewritten.channels) || !tracks.equals(rewritten.tracks)) {
+                throw new IOException("Metadata rewrite changed the audiobook's audio or media tracks");
+            }
+        }
+    }
+
+    private record Track(String handler, int id, long samples, long duration, int timescale) {
+        static Track read(TrakBox track) {
+            return new Track(track.getHandlerType(), track.getTrackHeader().getTrackId(),
+                    track.getSampleCount(), track.getMediaDuration(), track.getTimescale());
+        }
     }
 
     @Override

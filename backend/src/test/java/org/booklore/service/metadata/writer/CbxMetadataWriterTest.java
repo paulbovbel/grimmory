@@ -21,6 +21,7 @@ import javax.xml.parsers.DocumentBuilderFactory;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -30,6 +31,7 @@ import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.stream.Collectors;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import java.util.zip.ZipOutputStream;
@@ -39,11 +41,12 @@ import static org.junit.jupiter.api.Assertions.*;
 class CbxMetadataWriterTest {
 
     private CbxMetadataWriter writer;
+    private AppSettingService appSettingService;
     private Path tempDir;
 
     @BeforeEach
     void setup() throws Exception {
-        AppSettingService appSettingService = Mockito.mock(AppSettingService.class);
+        appSettingService = Mockito.mock(AppSettingService.class);
         AppSettings settings = new AppSettings();
         MetadataPersistenceSettings persistence = new MetadataPersistenceSettings();
         MetadataPersistenceSettings.SaveToOriginalFile save = new MetadataPersistenceSettings.SaveToOriginalFile();
@@ -76,6 +79,41 @@ class CbxMetadataWriterTest {
     @Test
     void getSupportedBookType_isCbx() {
         assertEquals(BookFileType.CBX, writer.getSupportedBookType());
+    }
+
+    @Test
+    void failedContentValidationPreservesOriginalAndExistingBackup() throws Exception {
+        File comic = createCbz(tempDir.resolve("original.cbz"), new String[]{"page1.jpg"});
+        byte[] originalBytes = Files.readAllBytes(comic.toPath());
+        Path backup = Files.writeString(tempDir.resolve("original.cbz.bak"), "existing recovery backup");
+        ArchiveService archives = Mockito.spy(new ArchiveService());
+        Mockito.doReturn(0L).when(archives).transferEntryTo(Mockito.any(Path.class),
+                Mockito.anyString(), Mockito.any(OutputStream.class));
+        CbxMetadataWriter guardedWriter = new CbxMetadataWriter(appSettingService, archives);
+        BookMetadataEntity metadata = new BookMetadataEntity();
+        metadata.setTitle("Updated comic");
+
+        guardedWriter.saveMetadataToFile(comic, metadata, null);
+
+        assertArrayEquals(originalBytes, Files.readAllBytes(comic.toPath()));
+        assertEquals("existing recovery backup", Files.readString(backup));
+        try (var files = Files.list(tempDir)) {
+            assertEquals(Set.of(comic.toPath(), backup), files.collect(Collectors.toSet()));
+        }
+    }
+
+    @Test
+    void conversionDoesNotOverwriteAnExistingCbz() throws Exception {
+        File source = createCbz(tempDir.resolve("comic.cbr"), new String[]{"page1.jpg"});
+        byte[] originalBytes = Files.readAllBytes(source.toPath());
+        Path target = Files.writeString(tempDir.resolve("comic.cbz"), "another comic");
+        BookMetadataEntity metadata = new BookMetadataEntity();
+        metadata.setTitle("Updated comic");
+
+        writer.saveMetadataToFile(source, metadata, null);
+
+        assertArrayEquals(originalBytes, Files.readAllBytes(source.toPath()));
+        assertEquals("another comic", Files.readString(target));
     }
 
     @Test

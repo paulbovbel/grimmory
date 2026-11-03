@@ -12,13 +12,12 @@ import org.booklore.model.entity.BookMetadataEntity;
 import org.booklore.model.enums.BookFileType;
 import org.booklore.service.appsettings.AppSettingService;
 import org.booklore.service.metadata.BookLoreMetadata;
+import org.booklore.util.AtomicFileWriter;
 import org.springframework.stereotype.Component;
 
 import java.io.File;
 import java.io.IOException;
-import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
@@ -46,52 +45,31 @@ public class PdfMetadataWriter implements MetadataWriter {
             return;
         }
 
-        Path filePath = file.toPath();
-        Path parentDir = filePath.getParent();
-        Path backupPath = null;
-        boolean backupCreated = false;
-        Path tempPath = null;
-
         try {
-            backupPath = Files.createTempFile(parentDir, ".pdfBackup-", ".pdf");
-            Files.copy(filePath, backupPath, StandardCopyOption.REPLACE_EXISTING);
-            backupCreated = true;
-        } catch (IOException e) {
-            log.warn("Could not create PDF temp backup for {}: {}", file.getName(), e.getMessage());
-        }
-
-        try (PdfDocument doc = PdfDocument.open(filePath)) {
-            applyMetadataToDocument(doc, metadataEntity, clear);
-            tempPath = Files.createTempFile(parentDir, ".pdfmeta-", ".pdf");
-            doc.save(tempPath);
-            Files.move(tempPath, filePath, StandardCopyOption.REPLACE_EXISTING);
-            tempPath = null;
+            AtomicFileWriter.update(file.toPath(), PdfMetadataWriter::readPageCount, working -> {
+                try (PdfDocument doc = PdfDocument.open(file.toPath())) {
+                    applyMetadataToDocument(doc, metadataEntity, clear);
+                    doc.save(working);
+                }
+                return true;
+            }, (before, after) -> {
+                if (!before.equals(after)) {
+                    throw new IOException("Metadata rewrite changed PDF page count");
+                }
+            });
             log.info("Successfully embedded metadata into PDF: {}", file.getName());
         } catch (Exception e) {
             log.warn("Failed to write metadata to PDF {}: {}", file.getName(), e.getMessage(), e);
-            if (backupCreated) {
-                try {
-                    Files.copy(backupPath, filePath, StandardCopyOption.REPLACE_EXISTING);
-                    log.info("Restored PDF {} from temp backup after failure", file.getName());
-                } catch (IOException ex) {
-                    log.error("Failed to restore PDF temp backup for {}: {}", file.getName(), ex.getMessage(), ex);
-                }
+        }
+    }
+
+    private static Integer readPageCount(Path file) throws IOException {
+        try (PdfDocument doc = PdfDocument.open(file)) {
+            int pages = doc.pageCount();
+            if (pages <= 0) {
+                throw new IOException("PDF has no readable pages: " + file);
             }
-        } finally {
-            if (tempPath != null) {
-                try {
-                    Files.deleteIfExists(tempPath);
-                } catch (IOException e) {
-                    log.warn("Could not delete PDF temp file: {}", e.getMessage());
-                }
-            }
-            if (backupCreated) {
-                try {
-                    Files.deleteIfExists(backupPath);
-                } catch (IOException e) {
-                    log.warn("Could not delete PDF temp backup for {}: {}", file.getName(), e.getMessage());
-                }
-            }
+            return pages;
         }
     }
 

@@ -17,6 +17,7 @@ import org.booklore.model.entity.*;
 import org.booklore.model.enums.BookFileType;
 import org.booklore.model.enums.ComicCreatorRole;
 import org.booklore.service.appsettings.AppSettingService;
+import org.booklore.util.AtomicFileWriter;
 import org.jsoup.Jsoup;
 import org.jsoup.safety.Safelist;
 import org.springframework.stereotype.Component;
@@ -25,13 +26,13 @@ import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
 import java.nio.file.Path;
-import java.nio.file.StandardCopyOption;
-import java.util.Comparator;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
 import java.util.zip.ZipOutputStream;
 
 @Slf4j
@@ -61,25 +62,16 @@ public class CbxMetadataWriter implements MetadataWriter {
             return;
         }
 
-        Path backupPath = createBackupFile(file);
-        Path extractDir = null;
-        Path tempArchive = null;
-        boolean writeSucceeded = false;
-
         try {
             ComicInfo comicInfo = loadOrCreateComicInfo(file.toPath());
             applyMetadataChanges(comicInfo, metadata, clearFlags);
             byte[] xmlContent = convertToBytes(comicInfo);
 
             log.debug("CbxMetadataWriter: Writing ComicInfo.xml to CBZ file: {}, XML size: {} bytes", file.getName(), xmlContent.length);
-            tempArchive = updateArchive(file, xmlContent);
-            writeSucceeded = true;
+            updateArchive(file, xmlContent);
             log.info("CbxMetadataWriter: Successfully wrote metadata to CBZ file: {}", file.getName());
         } catch (Exception e) {
-            restoreOriginalFile(backupPath, file);
             log.warn("Failed to write metadata for {}: {}", file.getName(), e.getMessage(), e);
-        } finally {
-            cleanupTempFiles(tempArchive, extractDir, backupPath, writeSucceeded);
         }
     }
 
@@ -99,17 +91,6 @@ public class CbxMetadataWriter implements MetadataWriter {
         }
 
         return true;
-    }
-
-    private Path createBackupFile(File file) {
-        try {
-            Path backupPath = Files.createTempFile(file.getParentFile().toPath(), "cbx_backup_", ".bak");
-            Files.copy(file.toPath(), backupPath, StandardCopyOption.REPLACE_EXISTING);
-            return backupPath;
-        } catch (Exception ex) {
-            log.warn("Unable to create backup for {}: {}", file.getAbsolutePath(), ex.getMessage(), ex);
-            return null;
-        }
     }
 
     private ComicInfo loadOrCreateComicInfo(Path path) {
@@ -466,15 +447,34 @@ public class CbxMetadataWriter implements MetadataWriter {
         return outputStream.toByteArray();
     }
 
-    private Path updateArchive(File originalFile, byte[] xmlContent) throws Exception {
-        // Create temp file in same directory as original for true atomic move on same filesystem
-        Path tempArchive = Files.createTempFile(originalFile.toPath().getParent(), ".cbx_edit_", ".cbz");
-        rebuildArchiveWithNewXml(originalFile.toPath(), tempArchive, xmlContent);
-
+    private void updateArchive(File originalFile, byte[] xmlContent) throws Exception {
         Path originalPath = originalFile.toPath().toAbsolutePath();
         Path targetPath = replaceFileExtension(originalPath, "cbz");
 
-        replaceFileAtomic(tempArchive, targetPath);
+        AtomicFileWriter.update(originalPath, targetPath, this::readArchiveContent, working -> {
+            rebuildArchiveWithNewXml(originalPath, working, xmlContent);
+            try (ZipFile zip = new ZipFile(working.toFile())) {
+                var comicInfo = zip.stream().filter(entry -> isComicInfoXml(entry.getName()))
+                        .findFirst().orElseThrow(() -> new IOException("Rewritten comic has no ComicInfo.xml"));
+                try (InputStream input = zip.getInputStream(comicInfo)) {
+                    parseComicInfo(input);
+                }
+                var entries = zip.entries();
+                while (entries.hasMoreElements()) {
+                    var entry = entries.nextElement();
+                    if (!entry.isDirectory()) {
+                        try (InputStream input = zip.getInputStream(entry)) {
+                            input.transferTo(OutputStream.nullOutputStream());
+                        }
+                    }
+                }
+            }
+            return true;
+        }, (before, after) -> {
+            if (!before.equals(after)) {
+                throw new IOException("Metadata rewrite changed comic archive content");
+            }
+        });
 
         if (!originalPath.equals(targetPath)) {
             log.debug("Deleting CBX archive after conversion to CBZ: {}", originalPath);
@@ -486,40 +486,12 @@ public class CbxMetadataWriter implements MetadataWriter {
             }
         }
 
-        return null;
     }
 
-    private void restoreOriginalFile(Path backupPath, File targetFile) {
-        try {
-            if (backupPath != null) {
-                Files.copy(backupPath, targetFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
-                log.info("Restored original file from backup after failure: {}", targetFile.getAbsolutePath());
-            }
-        } catch (Exception restoreException) {
-            log.warn("Failed to restore original file from backup: {} -> {}", backupPath, targetFile.getAbsolutePath(), restoreException);
-        }
-    }
-
-    private void cleanupTempFiles(Path tempArchive, Path extractDir, Path backupPath, boolean writeSucceeded) {
-        if (tempArchive != null) {
-            try {
-                Files.deleteIfExists(tempArchive);
-            } catch (Exception e) {
-                log.warn("Failed to delete temp file: {}", tempArchive, e);
-            }
-        }
-
-        if (extractDir != null) {
-            deleteDirectoryRecursively(extractDir);
-        }
-
-        if (writeSucceeded && backupPath != null) {
-            try {
-                Files.deleteIfExists(backupPath);
-            } catch (Exception e) {
-                log.warn("Failed to delete backup file: {}", backupPath, e);
-            }
-        }
+    private Map<String, Long> readArchiveContent(Path archive) throws IOException {
+        return archiveService.getEntries(archive).stream()
+                .filter(entry -> isPathSafe(entry.name()) && !isComicInfoXml(entry.name()))
+                .collect(Collectors.toMap(ArchiveService.Entry::name, ArchiveService.Entry::size));
     }
 
     private String joinStrings(Set<String> values) {
@@ -603,14 +575,6 @@ public class CbxMetadataWriter implements MetadataWriter {
         }
     }
 
-    private static void replaceFileAtomic(Path source, Path target) throws Exception {
-        try {
-            Files.move(source, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-        } catch (Exception e) {
-            Files.move(source, target, StandardCopyOption.REPLACE_EXISTING);
-        }
-    }
-
     private static Path replaceFileExtension(Path path, String extension) {
         String filename = path.getFileName().toString();
 
@@ -629,22 +593,6 @@ public class CbxMetadataWriter implements MetadataWriter {
     @Override
     public BookFileType getSupportedBookType() {
         return BookFileType.CBX;
-    }
-
-    private void deleteDirectoryRecursively(Path directory) {
-        try (var pathStream = Files.walk(directory)) {
-            pathStream
-                    .sorted(Comparator.reverseOrder())
-                    .forEach(path -> {
-                        try {
-                            Files.delete(path);
-                        } catch (IOException e) {
-                            log.warn("Failed to delete temp file/directory: {}", path, e);
-                        }
-                    });
-        } catch (IOException e) {
-            log.warn("Failed to clean up temporary directory: {}", directory, e);
-        }
     }
 
     private void appendBookLoreTag(StringBuilder sb, String tag, String value) {

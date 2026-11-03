@@ -27,6 +27,7 @@ import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -373,6 +374,20 @@ class PdfMetadataWriterTest {
 
         String xmpContent = readXmpContent(pdf);
         assertTrue(xmpContent.contains("<xmp:CreatorTool>Booklore</xmp:CreatorTool>"));
+    }
+
+    @Test
+    void unreadablePdfLeavesOriginalAndExistingBackupUntouched() throws Exception {
+        Path source = Files.writeString(tempDir.resolve("unreadable.pdf"), "not a PDF");
+        Path backup = Files.writeString(tempDir.resolve("unreadable.pdf.bak"), "existing recovery backup");
+
+        writer.saveMetadataToFile(source.toFile(), createBasicMetadata(), null);
+
+        assertEquals("not a PDF", Files.readString(source));
+        assertEquals("existing recovery backup", Files.readString(backup));
+        try (var files = Files.list(tempDir)) {
+            assertEquals(Set.of(source, backup), files.collect(Collectors.toSet()));
+        }
     }
 
     // ========== Helper Methods ==========
